@@ -39,6 +39,8 @@ On Colab/Kaggle, use the notebook's available Python/PyTorch environment, instal
 
 ## Fine-tune on Colab/Kaggle
 
+For an interactive Colab workflow covering split preparation, training, validation, optional final testing, and benchmarks, use [`notebooks/colab_training_and_evaluation.ipynb`](./notebooks/colab_training_and_evaluation.ipynb). The command-line steps below are also available for manual runs.
+
 After cloning or uploading this project into a GPU runtime, prepare the same split and run:
 
 ```bash
