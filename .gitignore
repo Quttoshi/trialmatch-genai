@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.py[cod]
+*.log
+.env
+data/raw/
+data/processed/*.jsonl
+models/
+outputs/
+*.safetensors
+*.bin

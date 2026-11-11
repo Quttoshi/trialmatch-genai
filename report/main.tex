@@ -1,0 +1,179 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{url}
+
+\title{Patient-to-Criterion Eligibility Screening with a Resource-Constrained Transformer}
+
+\author{\IEEEauthorblockN{Student Name}
+\IEEEauthorblockA{Course: Generative AI\\
+Institution: To be completed}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper describes a reproducible prototype for matching patient descriptions to
+individual clinical-trial eligibility criteria. The prescribed TrialGPT Criterion
+Annotations dataset is partitioned by patient, and a Qwen2.5 decoder model is adapted
+with parameter-efficient quantized fine-tuning. The system preserves expert label
+categories and sentence-level evidence IDs, and implements reference and optimized
+inference paths for key/value caching, tiled online-softmax attention, and greedy
+speculative decoding. A browser application exposes criterion-level predictions and
+inference comparisons. Experimental results are intentionally pending execution on a
+CUDA runtime; no performance values are claimed in this draft.
+\end{abstract}
+
+\begin{IEEEkeywords}
+clinical trial matching, eligibility criteria, evidence retrieval, QLoRA, key/value
+cache, online softmax, speculative decoding
+\end{IEEEkeywords}
+
+\section{Introduction}
+Clinical trial screening requires comparing patient facts with many individual
+inclusion and exclusion criteria. TrialGPT established criterion-level matching with
+expert annotations and evidence-oriented explanations \cite{jin2024trialgpt}. This
+project implements a smaller local-model system under a 4\,GB RTX 3050 constraint,
+while keeping training portable to free Colab or Kaggle GPU runtimes.
+
+The unit of prediction is a patient--criterion pair. The system does not treat an
+aggregated patient--trial verdict as a separately labeled ground truth. Missing
+information is not treated as evidence of either eligibility or ineligibility.
+
+\section{Related Work}
+TrialGPT decomposes trial matching into retrieval, criterion matching, and ranking;
+this work focuses on the labeled criterion-level task \cite{jin2024trialgpt}. LoRA
+adapts frozen pretrained weights with low-rank trainable matrices
+\cite{hu2022lora}; QLoRA combines this approach with 4-bit quantization to reduce
+fine-tuning memory \cite{dettmers2023qlora}. FlashAttention motivates tiled,
+IO-aware exact attention and online normalization \cite{dao2022flashattention}.
+Speculative decoding verifies draft tokens with a target model while preserving
+greedy outputs when the acceptance procedure is correct
+\cite{leviathan2023speculative}.
+
+\section{Materials and Methods}
+\subsection{Dataset and Split}
+The required TrialGPT Criterion Annotations release contains 1,015 criterion
+annotations from 53 unique patient IDs \cite{trialgpt_dataset}. Patient IDs are sorted,
+shuffled with NumPy \texttt{default\_rng(42)}, and allocated to 37 training, 8
+validation, and 8 test patients. The resulting annotation counts are 603, 206, and
+206, respectively. The generated manifest records patient IDs and counts. No test
+labels are used for tuning.
+
+The model input uses only the patient note, criterion type, and criterion text. The
+expert eligibility label and expert sentence IDs are targets. Dataset fields
+\texttt{gpt4\_explanation}, \texttt{gpt4\_sentences}, \texttt{gpt4\_eligibility}, and
+\texttt{explanation\_correctness} are excluded. One source annotation has a null
+criterion text; it is retained with an empty value and an explicit missing-field
+marker rather than a synthesized criterion.
+
+\subsection{Models and Fine-Tuning}
+Two open-weight decoder sizes from the same model family were considered. The
+selected target is Qwen2.5-1.5B-Instruct (1.54B parameters, 28 decoder layers, grouped
+query attention, Apache-2.0); Qwen2.5-0.5B-Instruct (0.49B parameters, 24 layers,
+Apache-2.0) is the tokenizer-compatible draft model
+\cite{qwen25_15b_modelcard,qwen25_05b_modelcard}. At 4 bits, parameter payload alone
+has arithmetic lower bounds of approximately 0.72\,GiB and 0.23\,GiB, respectively;
+these are not peak-memory measurements and exclude quantization metadata, activations,
+KV cache, and runtime overhead.
+
+The training script uses 4-bit NF4 with double quantization, LoRA rank 8 and
+$\alpha=16$, microbatch size 1, gradient accumulation, and gradient checkpointing.
+The training target is a JSON object containing the original expert category and
+expert evidence sentence IDs. The loss is applied to target tokens and not to prompt
+tokens. The default maximum sequence length is 1,024 tokens with a reserved output
+budget. Long notes are truncated by removing trailing numbered sentences first, then
+by token prefix if necessary. Per-example metadata records truncation and any gold
+evidence IDs omitted from the prompt.
+
+\subsection{Criterion and Evidence Evaluation}
+Classification is evaluated with accuracy, macro-F1, per-class precision, recall and
+F1, and confusion matrices, overall and separately for inclusion and exclusion
+criteria. Invalid JSON outputs are counted under an explicit invalid-output label.
+Evidence retrieval uses set-based sentence IDs and reports micro and macro precision,
+recall, and F1. For a record with no gold evidence, an empty prediction is an exact
+empty match (per-record precision, recall, and F1 equal 1); a non-empty prediction is
+scored as 0 for that record. Invalid or out-of-context citations are separately
+counted. Explanations quote source patient sentences rather than generated
+unverifiable text.
+
+\subsection{KV-Cached Decoding}
+The uncached reference recomputes the complete prefix at every greedy step. The cached
+path performs a prompt prefill, then passes only the newest token and reuses the
+returned key/value tensors. It supplies explicit cache positions and position IDs,
+extends the attention mask as the cache grows, and verifies the cache length after
+each update. Greedy token sequences are compared exactly. The benchmark records
+prefill time, decode time, throughput, and incremental peak CUDA allocation.
+
+\subsection{Tiled Online-Softmax Attention}
+The reference computes scaled dot-product attention
+\begin{equation}
+  \mathrm{Attention}(Q,K,V)
+  = \mathrm{softmax}\left(\frac{QK^\top}{\sqrt{d_k}} + M\right)V,
+\end{equation}
+where $M$ encodes causal and optional boolean masks. The tiled implementation updates
+the running row maximum $m$, normalization $l$, and weighted value accumulator $o$
+for each key block:
+\begin{align}
+  m' &= \max(m, m_b), \\
+  \alpha &= \exp(m-m'), \quad
+  p_b = \exp(s_b-m'), \\
+  l' &= \alpha l + \sum p_b, \quad
+  o' = \alpha o + p_b V_b.
+\end{align}
+The result is $o/l$, with all-masked rows defined as zero. The provided educational
+implementation uses NumPy and is checked against the reference on controlled causal
+and masked inputs; it is not a fused GPU kernel.
+
+\subsection{Speculative Decoding}
+The draft model proposes a short greedy token block. The target verifies the block in
+one forward pass; matching tokens are accepted until the first mismatch, at which
+point the target's greedy token is emitted. Both caches are cropped to the accepted
+prefix and advanced with the correction token. If every draft token is accepted, a
+target bonus token may be emitted. Tokenizer vocabularies are checked for exact
+compatibility. Benchmarks report token equality, acceptance rate, latency, throughput,
+and incremental memory; speedup is not assumed.
+
+\subsection{Browser Application}
+The Streamlit application accepts a patient record and criterion list, returns one
+result per criterion, displays exact evidence sentences, and exports a Markdown
+screening report. A prominent notice states that the prototype is educational and is
+not a clinical enrollment decision. The interface also exposes KV-cache and
+speculative-decoding comparisons.
+
+\section{Experimental Setup and Metrics}
+The local development machine is Windows with an NVIDIA GeForce RTX 3050 and 4\,GB
+VRAM. PyTorch/CUDA was not installed in the development Python environment during
+initial implementation. QLoRA training and GPU inference benchmarks are therefore
+planned on a free Colab or Kaggle GPU; measured hardware, runtime, precision,
+sequence-length settings, and repetitions must be recorded when those experiments
+are run.
+
+\section{Results and Discussion}
+\textbf{Pending execution.} Populate this section only with outputs produced by the
+training, validation, final test, and benchmark scripts. Do not report the CPU
+attention smoke test as a GPU result. Required final tables include baseline versus
+fine-tuned classification, evidence retrieval, cache versus uncached latency and
+memory, attention numerical error and runtime, and speculative acceptance and
+throughput.
+
+\section{Limitations}
+The benchmark has 53 patient groups, and the selected 1.5B model is substantially
+smaller than the models often used for complex clinical reasoning. Truncation can
+remove relevant record sentences; the pipeline records this event but cannot recover
+information not presented to the model. The output is a research prototype and is
+not suitable for clinical decisions.
+
+\section{Conclusion}
+This draft specifies a reproducible criterion-level system and its evaluation
+protocol. Conclusions about model quality, latency, and memory remain pending the
+required CUDA experiments and untouched final test evaluation.
+
+\section*{AI Use Statement}
+AI assistance was used during implementation and drafting. The student must verify,
+understand, and acknowledge all generated or adapted material and must independently
+run the experiments and defend the final system.
+
+\bibliographystyle{IEEEtran}
+\bibliography{../references}
+\end{document}
