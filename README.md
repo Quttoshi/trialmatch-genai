@@ -56,6 +56,8 @@ python -m trialmatch.train \
 
 The trainer uses 4-bit NF4 with double quantization, LoRA rank 8, microbatch 1, gradient accumulation, and gradient checkpointing. It selects the best checkpoint by validation loss and writes training logs, label counts, and per-example truncation metadata, including gold evidence IDs omitted from the prompt. To fit the context budget, it removes trailing complete numbered note sentences first; if needed, it token-truncates the remaining note from the end. Criterion text and target labels are retained. The script never loads the test split.
 
+To continue after a Colab disconnect, remount the same Google Drive and pass `--resume-from-checkpoint` when rerunning the training command. The latest saved checkpoint is resumed when present; checkpoints are saved at epoch boundaries, so work since the last completed epoch must run again.
+
 ## Evaluate on validation
 
 The evaluator runs the base model and, when `--adapter` is supplied, the fine-tuned adapter on the same validation examples with deterministic greedy decoding:

@@ -24,6 +24,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=float, default=3.0)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        action="store_true",
+        help="Resume from the latest checkpoint in the output directory when available.",
+    )
     return parser.parse_args()
 
 
@@ -213,7 +218,16 @@ def main() -> None:
         ),
         processing_class=tokenizer,
     )
-    trainer.train()
+    resume_checkpoint = None
+    if args.resume_from_checkpoint:
+        from transformers.trainer_utils import get_last_checkpoint
+
+        resume_checkpoint = get_last_checkpoint(str(args.output_dir))
+        if resume_checkpoint:
+            print(f"Resuming from checkpoint: {resume_checkpoint}")
+        else:
+            print(f"No checkpoint found in {args.output_dir}; starting a new run.")
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
     trainer.save_model(str(args.output_dir / "adapter"))
     tokenizer.save_pretrained(str(args.output_dir / "adapter"))
     (args.output_dir / "training_log.json").write_text(
